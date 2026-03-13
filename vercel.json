@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.html",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "api/**/*.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/initiate-payment",
+      "dest": "/api/initiate-payment.py"
+    },
+    {
+      "src": "/api/check-payment",
+      "dest": "/api/check-payment.py"
+    },
+    {
+      "src": "/api/mpesa-callback",
+      "dest": "/api/mpesa-callback.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}
