@@ -4,7 +4,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler
 
-from store import set_payment_status, get_reference_by_checkout
+from lib.store import set_payment_status, get_reference_by_checkout
 
 
 class handler(BaseHTTPRequestHandler):
