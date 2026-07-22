@@ -20,8 +20,8 @@
       "dest": "/api/check-payment.py"
     },
     {
-      "src": "/api/mpesa-callback",
-      "dest": "/api/mpesa-callback.py"
+      "src": "/api/callback",
+      "dest": "/api/callback.py"
     },
     {
       "src": "/(.*)",
