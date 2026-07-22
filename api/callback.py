@@ -69,13 +69,25 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._send_json({'status': 'Callback endpoint active'}, 200)
 
+    def do_OPTIONS(self):
+        """Handle CORS preflight."""
+        self.send_response(200)
+        self._cors_headers()
+        self.end_headers()
+
     def _send_json(self, data: dict, status: int = 200):
         body = json.dumps(data).encode('utf-8')
         self.send_response(status)
+        self._cors_headers()
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _cors_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-CitaPay-Signature')
 
     def log_message(self, format, *args):
         pass
