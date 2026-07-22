@@ -4,6 +4,8 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler
 
+from store import set_payment_status, get_reference_by_checkout
+
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -43,16 +45,22 @@ class handler(BaseHTTPRequestHandler):
             event = data.get('event')
             payload = data.get('data', {})
 
-            # This minimal version just logs, matching the original
-            # PayHero file's scope. If you want this to actually update a
-            # payment's status (e.g. for a polling endpoint to read), do
-            # that here: look up payload.get('metadata', {}).get('our_reference')
-            # or payload.get('reference'), and mark it SUCCESS if
-            # event == 'payment.completed', FAILED if 'payment.failed'.
-            if event == 'payment.completed':
+            # Prefer our own reference echoed back via metadata; fall back
+            # to the mapping we stored from CitaPay's own reference at
+            # initiate-time.
+            metadata = payload.get('metadata') or {}
+            reference = metadata.get('our_reference') or get_reference_by_checkout(payload.get('reference'))
+
+            if not reference:
+                print(f"No stored reference for this webhook — citapay reference: {payload.get('reference')}")
+            elif event == 'payment.completed':
                 print(f"Payment succeeded: {payload.get('reference')}")
+                set_payment_status(reference, status='SUCCESS', citapay_status=payload.get('status'))
             elif event == 'payment.failed':
                 print(f"Payment failed: {payload.get('reference')}")
+                set_payment_status(reference, status='FAILED', citapay_status=payload.get('status'))
+            # Other event types (payout.*, refund.*, etc.) are ignored here
+            # if this endpoint is ever subscribed to more than "payment.*".
 
             self._send_json({'status': 'Received'}, 200)
         except Exception as e:
