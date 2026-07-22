@@ -4,6 +4,8 @@ import uuid
 import requests
 from http.server import BaseHTTPRequestHandler
 
+from store import set_payment_status, link_checkout_reference
+
 
 def normalize_phone(phone: str) -> str:
     """Normalize phone number to 2547xxxxxxx format."""
@@ -57,6 +59,10 @@ def initiate_stk_push(phone_number: str, amount: float, customer_name: str = Non
 
     api_url = f'{get_base_url()}/checkout/payments'
 
+    # Mark this as pending before the call goes out, so payment-status.py
+    # has something to report even if the request is still in flight.
+    set_payment_status(reference, status='PENDING', amount=amount, phone_number=phone_number)
+
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=30)
         if response.status_code == 201:
@@ -65,26 +71,39 @@ def initiate_stk_push(phone_number: str, amount: float, customer_name: str = Non
             # separate from our internal `reference` above. Both matter:
             # our reference is what the frontend polls with; CitaPay's is
             # what you'd use to call their cancel/refund endpoints later.
+            citapay_reference = data.get('reference')
+            if citapay_reference:
+                link_checkout_reference(citapay_reference, reference)
+            set_payment_status(
+                reference,
+                status='PENDING',
+                citapay_reference=citapay_reference,
+                transaction_id=data.get('transactionId'),
+            )
             return {
                 'success': True,
                 'reference': reference,
-                'citapay_reference': data.get('reference'),
+                'citapay_reference': citapay_reference,
                 'transaction_id': data.get('transactionId'),
                 'data': data,
             }
         else:
             detail = response.json() if response.content else response.text
             message = detail.get('message') if isinstance(detail, dict) else None
+            set_payment_status(reference, status='FAILED', error=detail)
             return {
                 'success': False,
                 'message': message or f"STK Push failed with status {response.status_code}",
                 'detail': detail,
             }
     except requests.exceptions.Timeout:
+        set_payment_status(reference, status='FAILED', error='timeout')
         return {'success': False, 'message': 'Payment API request timed out.'}
     except requests.exceptions.RequestException as e:
+        set_payment_status(reference, status='FAILED', error=str(e))
         return {'success': False, 'message': f'Network error: {str(e)}'}
     except Exception as e:
+        set_payment_status(reference, status='FAILED', error=str(e))
         return {'success': False, 'message': f'Unexpected error: {str(e)}'}
 
 
