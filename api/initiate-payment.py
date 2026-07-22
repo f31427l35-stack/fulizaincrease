@@ -4,7 +4,7 @@ import uuid
 import requests
 from http.server import BaseHTTPRequestHandler
 
-from store import set_payment_status, link_checkout_reference
+from lib.store import set_payment_status, link_checkout_reference
 
 
 def normalize_phone(phone: str) -> str:
