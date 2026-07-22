@@ -11,7 +11,7 @@ import json
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-from store import get_payment_status
+from lib.store import get_payment_status
 
 
 class handler(BaseHTTPRequestHandler):
