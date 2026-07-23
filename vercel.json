@@ -16,8 +16,8 @@
       "dest": "/api/initiate-payment.py"
     },
     {
-      "src": "/api/payment-status",
-      "dest": "/api/payment-status.py"
+      "src": "/api/check-payment",
+      "dest": "/api/check-payment.py"
     },
     {
       "src": "/api/callback",
