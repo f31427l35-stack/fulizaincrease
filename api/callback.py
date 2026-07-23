@@ -1,91 +1,120 @@
-import hashlib
-import hmac
-import json
-import os
-from http.server import BaseHTTPRequestHandler
+/**
+ * Vercel Serverless Function
+ * POST /api/paynexus-callback
+ *
+ * Register this exact URL (https://your-app.vercel.app/api/paynexus-callback)
+ * via PayNexus's webhook registration endpoint or dashboard, subscribed to
+ * at least ["payment.completed", "payment.failed"]. The webhook secret
+ * generated there goes into PAYNEXUS_WEBHOOK_SECRET below.
+ *
+ * SECURITY: every request here MUST have its signature verified before
+ * being trusted. Without this, anyone who discovers this URL could POST a
+ * fake "payment.completed" event and mark an unpaid application as paid.
+ * PayNexus signs the RAW request body with HMAC-SHA256, sent in the
+ * X-PayNexus-Signature header — which is why body parsing is disabled
+ * below (Vercel's default JSON parsing would otherwise destroy the exact
+ * byte sequence the signature was computed over).
+ */
 
-from lib.store import set_payment_status, get_reference_by_checkout
+import crypto from 'crypto';
+import { setPaymentStatus, getReferenceByCheckoutRequestId } from '../lib/store.js';
 
+export const config = {
+    api: {
+        bodyParser: false
+    }
+};
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            raw_body = self.rfile.read(content_length) if content_length else b''
+function readRawBody(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on('data', (chunk) => chunks.push(chunk));
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+    });
+}
 
-            # PayNexus signs every webhook with HMAC-SHA256 over the RAW
-            # request body, sent in X-PayNexus-Signature. Verify first,
-            # trust nothing until it checks out.
-            secret = os.environ.get('PAYNEXUS_WEBHOOK_SECRET', '')
-            if not secret:
-                print('Missing PAYNEXUS_WEBHOOK_SECRET — refusing to process an unverifiable webhook')
-                self._send_json({'ResultCode': 1, 'ResultDesc': 'Webhook secret not configured'}, 500)
-                return
+function statusFromEvent(eventName) {
+    if (eventName === 'payment.completed') return 'SUCCESS';
+    if (eventName === 'payment.failed') return 'FAILED';
+    // payment.initiated and anything else — no status change, just logged.
+    return null;
+}
 
-            signature = self.headers.get('X-PayNexus-Signature', '')
-            expected = hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
+export default async function handler(req, res) {
+    if (req.method !== 'POST') {
+        return res.status(405).json({ success: false, message: 'Method not allowed' });
+    }
 
-            if not signature or not hmac.compare_digest(expected, signature):
-                print('PayNexus webhook signature mismatch — ignoring request')
-                self._send_json({'ResultCode': 1, 'ResultDesc': 'Invalid signature'}, 401)
-                return
+    if (!process.env.PAYNEXUS_WEBHOOK_SECRET) {
+        console.error('Missing PAYNEXUS_WEBHOOK_SECRET — refusing to process an unverifiable webhook');
+        return res.status(500).json({ ResultCode: 1, ResultDesc: 'Webhook secret not configured' });
+    }
 
-            data = json.loads(raw_body) if raw_body else {}
-            print(f"PayNexus Callback received (signature verified): {json.dumps(data, indent=2)}")
+    const rawBody = await readRawBody(req);
+    const signature = req.headers['x-paynexus-signature'];
 
-            event = data.get('event')
-            payload = data.get('data', {})
+    const expected = crypto
+        .createHmac('sha256', process.env.PAYNEXUS_WEBHOOK_SECRET)
+        .update(rawBody)
+        .digest('hex');
 
-            paynexus_reference = payload.get('reference')
-            reference = get_reference_by_checkout(paynexus_reference) if paynexus_reference else None
+    if (!signature || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))) {
+        console.warn('PayNexus webhook signature mismatch — ignoring request');
+        return res.status(401).json({ ResultCode: 1, ResultDesc: 'Invalid signature' });
+    }
 
-            if not reference:
-                print(f"No stored reference for this webhook — PayNexus reference: {paynexus_reference}")
-            elif event == 'payment.completed':
-                print(f"Payment succeeded: {paynexus_reference}")
-                set_payment_status(
-                    reference,
-                    status='SUCCESS',
-                    provider_transaction_id=payload.get('provider_transaction_id'),
-                    payer_name=payload.get('payer_name'),
-                )
-            elif event == 'payment.failed':
-                print(f"Payment failed: {paynexus_reference}")
-                set_payment_status(
-                    reference,
-                    status='FAILED',
-                    failure_reason=payload.get('failure_reason'),
-                    user_message=payload.get('user_message'),
-                )
-            elif event == 'payment.initiated':
-                print(f"Payment initiated confirmed by webhook: {paynexus_reference}")
-            # invoice.*, subscription.* events ignored unless subscribed.
+    let payload;
+    try {
+        payload = JSON.parse(rawBody.toString());
+    } catch (err) {
+        console.error('PayNexus webhook: could not parse verified body as JSON', err);
+        return res.status(400).json({ ResultCode: 1, ResultDesc: 'Malformed payload' });
+    }
 
-            self._send_json({'ResultCode': 0, 'ResultDesc': 'Received'}, 200)
-        except Exception as e:
-            self._send_json({'ResultCode': 1, 'ResultDesc': str(e)}, 400)
+    console.log('PayNexus webhook received (signature verified):', JSON.stringify(payload, null, 2));
 
-    def do_GET(self):
-        self._send_json({'status': 'Callback endpoint active'}, 200)
+    const { event, data } = payload || {};
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self._cors_headers()
-        self.end_headers()
+    if (!data || !data.reference) {
+        console.warn('Webhook missing reference — event:', event);
+        return res.status(200).json({ ResultCode: 0, ResultDesc: 'Received' });
+    }
 
-    def _send_json(self, data: dict, status: int = 200):
-        body = json.dumps(data).encode('utf-8')
-        self.send_response(status)
-        self._cors_headers()
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    // PayNexus's reference was linked back to our own reference at
+    // initiate-time via linkCheckoutRequestId.
+    const reference = getReferenceByCheckoutRequestId(data.reference);
 
-    def _cors_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-PayNexus-Signature')
+    if (!reference) {
+        console.warn('No stored reference for this webhook — PayNexus reference:', data.reference);
+        return res.status(200).json({ ResultCode: 0, ResultDesc: 'Received' });
+    }
 
-    def log_message(self, format, *args):
-        pass
+    const status = statusFromEvent(event);
+
+    if (status === 'SUCCESS') {
+        setPaymentStatus(reference, {
+            status: 'SUCCESS',
+            paynexusStatus: data.status,
+            providerTransactionId: data.provider_transaction_id,
+            payerName: data.payer_name,
+            event
+        });
+    } else if (status === 'FAILED') {
+        setPaymentStatus(reference, {
+            status: 'FAILED',
+            paynexusStatus: data.status,
+            failureReason: data.failure_reason,
+            userMessage: data.user_message,
+            event
+        });
+    } else {
+        // payment.initiated / invoice.* / subscription.* — logged only,
+        // no status change (avoids overwriting PENDING with duplicate info
+        // or clobbering a later SUCCESS/FAILED if delivered out of order).
+        console.log(`Webhook event "${event}" received for ${reference} — no status change applied`);
+    }
+
+    // Must respond 2xx quickly or PayNexus will retry with backoff.
+    res.status(200).json({ ResultCode: 0, ResultDesc: 'Received' });
+}
