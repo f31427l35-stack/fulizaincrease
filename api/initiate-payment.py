@@ -1,6 +1,5 @@
 import json
 import os
-import uuid
 import requests
 from http.server import BaseHTTPRequestHandler
 
@@ -8,102 +7,76 @@ from lib.store import set_payment_status, link_checkout_reference
 
 
 def normalize_phone(phone: str) -> str:
-    """Normalize phone number to 2547xxxxxxx format."""
-    phone = ''.join(filter(str.isdigit, phone)).lstrip('0')
-    if phone.startswith('0'):
-        phone = '254' + phone[1:]
-    elif not phone.startswith('254'):
-        phone = '254' + phone
-    return phone
+    """PayNexus's documented format is 0xxxxxxxxx (e.g. 0746990866).
+    Defensive normalization since the frontend now leaves the leading
+    0 visible as typed — handles 254-prefixed or bare 9-digit input too."""
+    digits = ''.join(filter(str.isdigit, phone))
+    if digits.startswith('0'):
+        return digits
+    if digits.startswith('254'):
+        return '0' + digits[3:]
+    return '0' + digits
 
 
 def get_base_url() -> str:
-    """CitaPay has separate sandbox/production hosts — pick one via env var."""
-    env = os.environ.get('CITAPAY_ENV', 'sandbox').strip().lower()
-    if env == 'production':
-        return 'https://citapayapi.citatech.cloud/api/v1'
-    return 'https://sandbox.citapayapi.citatech.cloud/api/v1'
+    return 'https://paynexus.co.ke/api'
 
 
-def initiate_stk_push(phone_number: str, amount: float, customer_name: str = None) -> dict:
-    """Call CitaPay's Payments API to initiate an M-Pesa STK push."""
-    api_key = os.environ.get('CITAPAY_API_KEY', '')
+def initiate_stk_push(phone_number: str, amount: float, description: str = None) -> dict:
+    """Call PayNexus's STK Push API."""
+    secret_key = os.environ.get('PAYNEXUS_SECRET_KEY', '')
 
-    # Validate required config
-    if not api_key:
-        return {'success': False, 'message': 'Missing config: CITAPAY_API_KEY'}
+    if not secret_key:
+        return {'success': False, 'message': 'Missing config: PAYNEXUS_SECRET_KEY'}
 
-    reference = str(uuid.uuid4())[:8].upper()
     phone_number = normalize_phone(phone_number)
-
-    # A fresh key per logical request — prevents a network retry or a
-    # double-tap on the frontend from creating a duplicate STK push.
-    idempotency_key = str(uuid.uuid4())
 
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {api_key}',
-        'Idempotency-Key': idempotency_key,
+        'X-API-Key': secret_key,
     }
 
     payload = {
         'amount': int(float(amount)),
-        'paymentMethod': 'MPESA',
-        'phoneNumber': phone_number,
-        'metadata': {
-            'our_reference': reference,
-        },
+        'phone': phone_number,
     }
-    if customer_name:
-        payload['customerName'] = customer_name
+    if description:
+        payload['description'] = description
 
-    api_url = f'{get_base_url()}/checkout/payments'
-
-    # Mark this as pending before the call goes out, so payment-status.py
-    # has something to report even if the request is still in flight.
-    set_payment_status(reference, status='PENDING', amount=amount, phone_number=phone_number)
+    api_url = f'{get_base_url()}/mpesa/payment/initiate'
 
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 201:
-            data = response.json()
-            # data['reference'] is CITAPAY'S own reference (e.g. TXNABC123DEF),
-            # separate from our internal `reference` above. Both matter:
-            # our reference is what the frontend polls with; CitaPay's is
-            # what you'd use to call their cancel/refund endpoints later.
-            citapay_reference = data.get('reference')
-            if citapay_reference:
-                link_checkout_reference(citapay_reference, reference)
-            set_payment_status(
-                reference,
-                status='PENDING',
-                citapay_reference=citapay_reference,
-                transaction_id=data.get('transactionId'),
-            )
+        body = response.json() if response.content else {}
+
+        if response.status_code in (200, 201) and body.get('success'):
+            data = body.get('data', {})
+            paynexus_reference = data.get('reference')
+
+            # PayNexus generates ITS OWN reference — link it back to our
+            # own reference so the webhook (which only carries PayNexus's
+            # reference) can be translated back to ours.
+            if paynexus_reference:
+                link_checkout_reference(paynexus_reference, phone_number)
+
             return {
                 'success': True,
-                'reference': reference,
-                'citapay_reference': citapay_reference,
-                'transaction_id': data.get('transactionId'),
+                'reference': paynexus_reference,
+                'checkout_request_id': data.get('checkout_request_id'),
                 'data': data,
             }
         else:
-            detail = response.json() if response.content else response.text
-            message = detail.get('message') if isinstance(detail, dict) else None
-            set_payment_status(reference, status='FAILED', error=detail)
+            message = body.get('message') if isinstance(body, dict) else None
             return {
                 'success': False,
                 'message': message or f"STK Push failed with status {response.status_code}",
-                'detail': detail,
+                'detail': body,
             }
     except requests.exceptions.Timeout:
-        set_payment_status(reference, status='FAILED', error='timeout')
         return {'success': False, 'message': 'Payment API request timed out.'}
     except requests.exceptions.RequestException as e:
-        set_payment_status(reference, status='FAILED', error=str(e))
         return {'success': False, 'message': f'Network error: {str(e)}'}
     except Exception as e:
-        set_payment_status(reference, status='FAILED', error=str(e))
         return {'success': False, 'message': f'Unexpected error: {str(e)}'}
 
 
@@ -116,17 +89,34 @@ class handler(BaseHTTPRequestHandler):
 
             phone_number = data.get('phone_number', '')
             amount = data.get('amount', 0)
-            customer_name = data.get('customer_name')
+            reference = data.get('reference')
+            description = data.get('description') or data.get('customer_name')
 
             if not phone_number or not amount:
                 self._send_json({'success': False, 'message': 'phone_number and amount are required'}, 400)
                 return
 
-            # Strip commas from amount if it's a string (e.g. "1,000")
             if isinstance(amount, str):
                 amount = float(amount.replace(',', ''))
 
-            result = initiate_stk_push(phone_number, amount, customer_name)
+            # Record our own PENDING entry before calling PayNexus, so
+            # payment-status.py has something to report even if the
+            # request is still in flight.
+            if reference:
+                set_payment_status(reference, status='PENDING', amount=amount, phone_number=phone_number)
+
+            result = initiate_stk_push(phone_number, amount, description)
+
+            if result.get('success') and reference:
+                set_payment_status(
+                    reference,
+                    status='PENDING',
+                    paynexus_reference=result.get('reference'),
+                    checkout_request_id=result.get('checkout_request_id'),
+                )
+            elif reference:
+                set_payment_status(reference, status='FAILED', error=result.get('message'))
+
             status = 200 if result.get('success') else 500
             self._send_json(result, status)
 
@@ -136,7 +126,6 @@ class handler(BaseHTTPRequestHandler):
             self._send_json({'success': False, 'message': str(e)}, 500)
 
     def do_OPTIONS(self):
-        """Handle CORS preflight."""
         self.send_response(200)
         self._cors_headers()
         self.end_headers()
@@ -156,4 +145,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
     def log_message(self, format, *args):
-        pass  # Suppress default logging noise
+        pass
