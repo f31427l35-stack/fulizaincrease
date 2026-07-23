@@ -38,6 +38,11 @@ export default async function handler(req, res) {
         return res.status(400).json({ success: false, message: 'Missing phone_number or amount' });
     }
 
+    if (!reference) {
+        console.error('Missing reference in request body — frontend must generate and send one');
+        return res.status(400).json({ success: false, message: 'Missing reference' });
+    }
+
     if (!process.env.PAYNEXUS_SECRET_KEY) {
         console.error('Missing PAYNEXUS_SECRET_KEY environment variable');
         return res.status(500).json({ success: false, message: 'Payment provider not configured' });
@@ -55,6 +60,8 @@ export default async function handler(req, res) {
             loan_limit
         });
 
+        console.log('Calling PayNexus:', `${BASE_URL}/mpesa/payment/initiate`, 'phone:', normalizedPhone, 'amount:', amount, 'reference:', reference);
+
         const response = await fetch(`${BASE_URL}/mpesa/payment/initiate`, {
             method: 'POST',
             headers: {
@@ -70,7 +77,11 @@ export default async function handler(req, res) {
             })
         });
 
+        console.log('PayNexus response status:', response.status);
+
         const body = await response.json();
+
+        console.log('PayNexus response body:', JSON.stringify(body));
 
         if (!response.ok || !body.success) {
             console.error('PayNexus payment initiation failed:', body);
@@ -101,11 +112,12 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
             success: true,
+            reference,
             checkout_request_id: data.checkout_request_id
         });
 
     } catch (err) {
-        console.error('PayNexus request error:', err);
+        console.error('PayNexus request error:', err.name, err.message, err.cause || '');
         setPaymentStatus(reference, { status: 'FAILED', error: String(err) });
         return res.status(502).json({ success: false, message: 'Could not reach payment provider' });
     }
