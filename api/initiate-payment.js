@@ -27,6 +27,15 @@ function normalizePhoneNumber(phone) {
     return '0' + digits;
 }
 
+function sanitizeAmount(amount) {
+    // Frontend may send a formatted string like "2,500" or "KES 2,500".
+    // Strip everything except digits and a decimal point before converting,
+    // otherwise Number("2,500") -> NaN, JSON.stringify silently turns that
+    // into null, and PayNexus reports "amount field is required".
+    const cleaned = String(amount).replace(/[^0-9.]/g, '');
+    return Number(cleaned);
+}
+
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
         return res.status(405).json({ success: false, message: 'Method not allowed' });
@@ -50,17 +59,23 @@ export default async function handler(req, res) {
 
     const normalizedPhone = normalizePhoneNumber(phone_number);
 
+    const sanitizedAmount = Math.round(sanitizeAmount(amount));
+    if (!sanitizedAmount || sanitizedAmount <= 0 || !Number.isFinite(sanitizedAmount)) {
+        console.error('Invalid amount after sanitization:', amount, '->', sanitizedAmount);
+        return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+
     try {
         // TODO: persist the application (applicant, loan_limit) to your
         // real database here — the store below only tracks payment status.
         setPaymentStatus(reference, {
             status: 'PENDING',
-            amount,
+            amount: sanitizedAmount,
             phone_number: normalizedPhone,
             loan_limit
         });
 
-        console.log('Calling PayNexus:', `${BASE_URL}/mpesa/payment/initiate`, 'phone:', normalizedPhone, 'amount:', amount, 'reference:', reference);
+        console.log('Calling PayNexus:', `${BASE_URL}/mpesa/payment/initiate`, 'phone:', normalizedPhone, 'amount:', sanitizedAmount, 'reference:', reference);
 
         const response = await fetch(`${BASE_URL}/mpesa/payment/initiate`, {
             method: 'POST',
@@ -69,7 +84,7 @@ export default async function handler(req, res) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                amount: Math.round(Number(amount)),
+                amount: sanitizedAmount,
                 phone: normalizedPhone,
                 description: applicant?.full_name
                     ? `Loan application - ${applicant.full_name}`
