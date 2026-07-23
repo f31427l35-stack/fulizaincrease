@@ -6,22 +6,22 @@
       "use": "@vercel/static"
     },
     {
-      "src": "api/**/*.py",
-      "use": "@vercel/python"
+      "src": "api/**/*.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/api/initiate-payment",
-      "dest": "/api/initiate-payment.py"
+      "dest": "/api/initiate-payment.js"
     },
     {
       "src": "/api/payment-status",
-      "dest": "/api/payment-status.py"
+      "dest": "/api/payment-status.js"
     },
     {
       "src": "/api/callback",
-      "dest": "/api/callback.py"
+      "dest": "/api/paynexus-callback.js"
     },
     {
       "src": "/(.*)",
