@@ -490,41 +490,41 @@
         let pollSeconds = 120;
 
         async function initiatePayment() {
-    let phone = document.getElementById('phone-number').value;
-    let cleanPhone = phone.toString().trim();
-    if (cleanPhone.startsWith('0')) cleanPhone = '254' + cleanPhone.substring(1);
-    else if (!cleanPhone.startsWith('254')) cleanPhone = '254' + cleanPhone;
-
-    const reference = crypto.randomUUID().slice(0, 8).toUpperCase();
-
-    closeModal('confirm-modal');
-    document.getElementById('loader-text').innerText = 'Sending STK Push...';
-    document.getElementById('global-loader').classList.remove('hidden');
-
-    try {
-        const response = await fetch('/api/initiate-payment', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone_number: cleanPhone, amount: selectedCharge, reference })
-        });
-
-        const result = await response.json();
-        document.getElementById('global-loader').classList.add('hidden');
-
-        if (result.success) {
-            document.getElementById('waiting-phone').textContent = `+254 ${cleanPhone.slice(3)}`;
-            document.getElementById('waiting-amount').textContent = `Ksh ${selectedCharge}`;
-            document.getElementById('waiting-screen').classList.remove('hidden');
-            document.body.style.overflow = 'hidden';
-            startPolling(reference);
-        } else {
-            alert('Error: ' + (result.message || 'Could not send STK push. Try again.'));
+            let phone = document.getElementById('phone-number').value;
+            let cleanPhone = phone.toString().trim();
+            if (cleanPhone.startsWith('0')) cleanPhone = '254' + cleanPhone.substring(1);
+            else if (!cleanPhone.startsWith('254')) cleanPhone = '254' + cleanPhone;
+        
+            const reference = crypto.randomUUID().slice(0, 8).toUpperCase();
+        
+            closeModal('confirm-modal');
+            document.getElementById('loader-text').innerText = 'Sending STK Push...';
+            document.getElementById('global-loader').classList.remove('hidden');
+        
+            try {
+                const response = await fetch('/api/initiate-payment', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone_number: cleanPhone, amount: selectedCharge, reference })
+                });
+        
+                const result = await response.json();
+                document.getElementById('global-loader').classList.add('hidden');
+        
+                if (result.success) {
+                    document.getElementById('waiting-phone').textContent = `+254 ${cleanPhone.slice(3)}`;
+                    document.getElementById('waiting-amount').textContent = `Ksh ${selectedCharge}`;
+                    document.getElementById('waiting-screen').classList.remove('hidden');
+                    document.body.style.overflow = 'hidden';
+                    startPolling(reference);
+                } else {
+                    alert('Error: ' + (result.message || 'Could not send STK push. Try again.'));
+                }
+            } catch (error) {
+                document.getElementById('global-loader').classList.add('hidden');
+                alert('Service Timeout: Please try again');
+            }
         }
-    } catch (error) {
-        document.getElementById('global-loader').classList.add('hidden');
-        alert('Service Timeout: Please try again');
-    }
-}
 
         function startPolling(reference) {
             pollSeconds = 120;
