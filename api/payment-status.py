@@ -3,8 +3,8 @@ GET /api/payment-status?reference=XXXXXXXX
 
 Polled by the frontend after initiating a payment, so the UI only shows
 "Success" once callback.py has actually recorded a verified confirmation
-— never based on the initial "queued" response from initiate-payment.py
-alone.
+from PayNexus's webhook — never based on the initial "initiated" response
+from payment-inititation.py alone.
 """
 
 import json
@@ -30,7 +30,10 @@ class handler(BaseHTTPRequestHandler):
             self._send_json({'status': 'UNKNOWN', 'message': 'No record for this reference yet'}, 404)
             return
 
-        self._send_json({'status': record.get('status', 'PENDING')}, 200)
+        response = {'status': record.get('status', 'PENDING')}
+        if record.get('status') == 'FAILED' and record.get('user_message'):
+            response['message'] = record.get('user_message')
+        self._send_json(response, 200)
 
     def do_OPTIONS(self):
         self.send_response(200)
