@@ -541,24 +541,24 @@
             setTimeout(() => pollPaymentStatus(reference), 3000);
         }
 
-        async function pollPaymentStatus(reference) {
-            try {
-                const res = await fetch(`/api/check-payment?reference=${encodeURIComponent(reference)}`);
-                const data = await res.json();
-                if (!data.success) return;
-                if (data.status === 'paid') {
-                    stopPolling();
-                    document.getElementById('waiting-screen').classList.add('hidden');
-                    document.getElementById('success-limit').textContent = `Ksh ${selectedAmount}`;
-                    document.getElementById('success-screen').classList.remove('hidden');
-                } else if (data.status === 'failed') {
-                    stopPolling();
-                    document.getElementById('waiting-screen').classList.add('hidden');
-                    document.body.style.overflow = 'auto';
-                    showPaymentFailed();
-                }
-            } catch (e) { /* keep polling on network glitch */ }
-        }
+    async function pollPaymentStatus(reference) {
+        try {
+            const res = await fetch(`/api/payment-status?reference=${encodeURIComponent(reference)}`);
+            const data = await res.json();
+            if (data.status === 'SUCCESS') {
+                stopPolling();
+                document.getElementById('waiting-screen').classList.add('hidden');
+                document.getElementById('success-limit').textContent = `Ksh ${selectedAmount}`;
+                document.getElementById('success-screen').classList.remove('hidden');
+            } else if (data.status === 'FAILED') {
+                stopPolling();
+                document.getElementById('waiting-screen').classList.add('hidden');
+                document.body.style.overflow = 'auto';
+                showPaymentFailed();
+            }
+            // PENDING/UNKNOWN → keep polling
+        } catch (e) { /* keep polling on network glitch */ }
+    }
 
         function stopPolling() {
             clearInterval(pollInterval);
