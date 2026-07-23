@@ -49,7 +49,7 @@ def initiate_stk_push(phone_number: str, amount: float, description: str = None)
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=30)
 
-        # TEMP DEBUG — remove once we've diagnosed the response issue
+        # TEMP DEBUG — remove once we've diagnosed the response isssue
         print(f"PayNexus status code: {response.status_code}")
         print(f"PayNexus raw response: {response.text[:500]!r}")
         print(f"PayNexus response headers: {dict(response.headers)}")
