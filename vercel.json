@@ -21,7 +21,7 @@
     },
     {
       "src": "/api/callback",
-      "dest": "/api/paynexus-callback.js"
+      "dest": "/api/callback.js"
     },
     {
       "src": "/(.*)",
