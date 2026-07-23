@@ -1,3 +1,17 @@
+"""
+Vercel Serverless Function
+POST /api/initiate-payment
+
+Called by the frontend when the user taps "Proceed to Payment".
+Reads your PayNexus secret key from Vercel Environment Variables (never
+from the frontend) and triggers a real STK push via PayNexus's
+STK Push API.
+
+Set these in your Vercel project:
+  Project -> Settings -> Environment Variables
+    PAYNEXUS_SECRET_KEY   (sk_... from your PayNexus dashboard)
+"""
+
 import json
 import os
 import requests
@@ -5,88 +19,20 @@ from http.server import BaseHTTPRequestHandler
 
 from lib.store import set_payment_status, link_checkout_reference
 
+BASE_URL = 'https://paynexus.co.ke/api'
 
-def normalize_phone(phone: str) -> str:
-    """Normalize to 254xxxxxxxxx format — confirmed working in another
-    PayNexus integration."""
+
+def normalize_phone_number(phone: str) -> str:
+    """PayNexus's documented format is 0xxxxxxxxx (e.g. 0746990866).
+    Defensive normalization since we don't control what shape the
+    frontend sends — handles 254-prefixed, bare 9-digit, or already
+    correct 0-prefixed input."""
     digits = ''.join(filter(str.isdigit, phone))
-    if digits.startswith('254'):
-        return digits
     if digits.startswith('0'):
-        return '254' + digits[1:]
-    return '254' + digits
-
-
-def get_base_url() -> str:
-    return 'https://paynexus.co.ke/api'
-
-
-def initiate_stk_push(phone_number: str, amount: float, description: str = None) -> dict:
-    """Call PayNexus's STK Push API."""
-    secret_key = os.environ.get('PAYNEXUS_SECRET_KEY', '')
-
-    if not secret_key:
-        print('Missing PAYNEXUS_SECRET_KEY environment variable', flush=True)
-        return {'success': False, 'message': 'Missing config: PAYNEXUS_SECRET_KEY'}
-
-    phone_number = normalize_phone(phone_number)
-
-    headers = {
-        'Content-Type': 'application/json',
-        'X-API-Key': secret_key,
-    }
-
-    payload = {
-        'amount': int(float(amount)),
-        'phone': phone_number,
-    }
-    if description:
-        payload['description'] = description
-
-    api_url = f'{get_base_url()}/mpesa/payment/initiate'
-
-    try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-
-        # TEMP DEBUG — remove once we've diagnosed the response issue
-        print(f"PayNexus status code: {response.status_code}", flush=True)
-        print(f"PayNexus raw response: {response.text[:500]!r}", flush=True)
-        print(f"PayNexus response headers: {dict(response.headers)}", flush=True)
-
-        body = response.json() if response.content else {}
-
-        if response.status_code in (200, 201) and body.get('success'):
-            data = body.get('data', {})
-            paynexus_reference = data.get('reference')
-
-            # PayNexus generates ITS OWN reference — link it back to our
-            # own reference so the webhook (which only carries PayNexus's
-            # reference) can be translated back to ours.
-            if paynexus_reference:
-                link_checkout_reference(paynexus_reference, phone_number)
-
-            return {
-                'success': True,
-                'reference': paynexus_reference,
-                'checkout_request_id': data.get('checkout_request_id'),
-                'data': data,
-            }
-        else:
-            message = body.get('message') if isinstance(body, dict) else None
-            return {
-                'success': False,
-                'message': message or f"STK Push failed with status {response.status_code}",
-                'detail': body,
-            }
-    except requests.exceptions.Timeout:
-        print("PayNexus request timed out", flush=True)
-        return {'success': False, 'message': 'Payment API request timed out.'}
-    except requests.exceptions.RequestException as e:
-        print(f"PayNexus network error: {str(e)}", flush=True)
-        return {'success': False, 'message': f'Network error: {str(e)}'}
-    except Exception as e:
-        print(f"PayNexus unexpected error: {str(e)}", flush=True)
-        return {'success': False, 'message': f'Unexpected error: {str(e)}'}
+        return digits
+    if digits.startswith('254'):
+        return '0' + digits[3:]
+    return '0' + digits
 
 
 class handler(BaseHTTPRequestHandler):
@@ -94,46 +40,96 @@ class handler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
-            data = json.loads(body)
-
-            phone_number = data.get('phone_number', '')
-            amount = data.get('amount', 0)
-            reference = data.get('reference')
-            description = data.get('description') or data.get('customer_name')
-
-            if not phone_number or not amount:
-                self._send_json({'success': False, 'message': 'phone_number and amount are required'}, 400)
-                return
-
-            if isinstance(amount, str):
-                amount = float(amount.replace(',', ''))
-
-            # Record our own PENDING entry before calling PayNexus, so
-            # payment-status.py has something to report even if the
-            # request is still in flight.
-            if reference:
-                set_payment_status(reference, status='PENDING', amount=amount, phone_number=phone_number)
-
-            result = initiate_stk_push(phone_number, amount, description)
-
-            if result.get('success') and reference:
-                set_payment_status(
-                    reference,
-                    status='PENDING',
-                    paynexus_reference=result.get('reference'),
-                    checkout_request_id=result.get('checkout_request_id'),
-                )
-            elif reference:
-                set_payment_status(reference, status='FAILED', error=result.get('message'))
-
-            status = 200 if result.get('success') else 500
-            self._send_json(result, status)
-
+            req_body = json.loads(body) if body else {}
         except json.JSONDecodeError:
             self._send_json({'success': False, 'message': 'Invalid JSON body'}, 400)
-        except Exception as e:
-            print(f"initiate-payment handler exception: {str(e)}", flush=True)
-            self._send_json({'success': False, 'message': str(e)}, 500)
+            return
+
+        phone_number = req_body.get('phone_number')
+        amount = req_body.get('amount')
+        reference = req_body.get('reference')
+        loan_limit = req_body.get('loan_limit')
+        applicant = req_body.get('applicant') or {}
+
+        if not phone_number or not amount:
+            self._send_json({'success': False, 'message': 'Missing phone_number or amount'}, 400)
+            return
+
+        secret_key = os.environ.get('PAYNEXUS_SECRET_KEY', '')
+        if not secret_key:
+            print('Missing PAYNEXUS_SECRET_KEY environment variable')
+            self._send_json({'success': False, 'message': 'Payment provider not configured'}, 500)
+            return
+
+        normalized_phone = normalize_phone_number(phone_number)
+
+        try:
+            # TODO: persist the application (applicant, loan_limit) to your
+            # real database here — the store below only tracks payment status.
+            set_payment_status(
+                reference,
+                status='PENDING',
+                amount=amount,
+                phone_number=normalized_phone,
+                loan_limit=loan_limit,
+            )
+
+            full_name = applicant.get('full_name')
+            description = f"Loan application - {full_name}" if full_name else f"Loan application {reference}"
+
+            response = requests.post(
+                f'{BASE_URL}/mpesa/payment/initiate',
+                headers={
+                    'X-API-Key': secret_key,
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'amount': round(float(amount)),
+                    'phone': normalized_phone,
+                    'description': description,
+                },
+                timeout=30,
+            )
+
+            resp_body = response.json() if response.content else {}
+
+            if not response.ok if hasattr(response, 'ok') else response.status_code >= 400 or not resp_body.get('success'):
+                print(f'PayNexus payment initiation failed: {resp_body}')
+                set_payment_status(reference, status='FAILED', error=resp_body)
+                self._send_json({
+                    'success': False,
+                    'message': resp_body.get('message', 'Could not reach payment provider'),
+                }, 502)
+                return
+
+            data = resp_body.get('data', {})
+
+            # status here just means the request was accepted and the STK
+            # push is going out — not that the customer has paid. Real
+            # confirmation comes from the PayNexus webhook (callback.py),
+            # which payment-status.py reports back to the frontend.
+            #
+            # PayNexus generates ITS OWN reference (unlike our pre-generated
+            # one) — link it back to our reference so the webhook, which
+            # only carries PayNexus's reference, can be translated back
+            # to ours.
+            link_checkout_reference(data.get('reference'), reference)
+            set_payment_status(
+                reference,
+                status='PENDING',
+                paynexus_reference=data.get('reference'),
+                checkout_request_id=data.get('checkout_request_id'),
+            )
+
+            self._send_json({
+                'success': True,
+                'checkout_request_id': data.get('checkout_request_id'),
+            }, 200)
+
+        except Exception as err:
+            print(f'PayNexus request error: {str(err)}')
+            set_payment_status(reference, status='FAILED', error=str(err))
+            self._send_json({'success': False, 'message': 'Could not reach payment provider'}, 502)
 
     def do_OPTIONS(self):
         self.send_response(200)
