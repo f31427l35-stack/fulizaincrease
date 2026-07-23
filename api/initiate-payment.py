@@ -7,15 +7,14 @@ from lib.store import set_payment_status, link_checkout_reference
 
 
 def normalize_phone(phone: str) -> str:
-    """PayNexus's documented format is 0xxxxxxxxx (e.g. 0746990866).
-    Defensive normalization since the frontend now leaves the leading
-    0 visible as typed — handles 254-prefixed or bare 9-digit input too."""
+    """Normalize to 254xxxxxxxxx format — confirmed working in another
+    PayNexus integration."""
     digits = ''.join(filter(str.isdigit, phone))
-    if digits.startswith('0'):
-        return digits
     if digits.startswith('254'):
-        return '0' + digits[3:]
-    return '0' + digits
+        return digits
+    if digits.startswith('0'):
+        return '254' + digits[1:]
+    return '254' + digits
 
 
 def get_base_url() -> str:
@@ -27,7 +26,7 @@ def initiate_stk_push(phone_number: str, amount: float, description: str = None)
     secret_key = os.environ.get('PAYNEXUS_SECRET_KEY', '')
 
     if not secret_key:
-        print('Missing PAYNEXUS_SECRET_KEY environment variable')
+        print('Missing PAYNEXUS_SECRET_KEY environment variable', flush=True)
         return {'success': False, 'message': 'Missing config: PAYNEXUS_SECRET_KEY'}
 
     phone_number = normalize_phone(phone_number)
@@ -49,10 +48,10 @@ def initiate_stk_push(phone_number: str, amount: float, description: str = None)
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=30)
 
-        # TEMP DEBUG — remove once we've diagnosed the response isssue
-        print(f"PayNexus status code: {response.status_code}")
-        print(f"PayNexus raw response: {response.text[:500]!r}")
-        print(f"PayNexus response headers: {dict(response.headers)}")
+        # TEMP DEBUG — remove once we've diagnosed the response issue
+        print(f"PayNexus status code: {response.status_code}", flush=True)
+        print(f"PayNexus raw response: {response.text[:500]!r}", flush=True)
+        print(f"PayNexus response headers: {dict(response.headers)}", flush=True)
 
         body = response.json() if response.content else {}
 
@@ -80,13 +79,13 @@ def initiate_stk_push(phone_number: str, amount: float, description: str = None)
                 'detail': body,
             }
     except requests.exceptions.Timeout:
-        print("PayNexus request timed out")
+        print("PayNexus request timed out", flush=True)
         return {'success': False, 'message': 'Payment API request timed out.'}
     except requests.exceptions.RequestException as e:
-        print(f"PayNexus network error: {str(e)}")
+        print(f"PayNexus network error: {str(e)}", flush=True)
         return {'success': False, 'message': f'Network error: {str(e)}'}
     except Exception as e:
-        print(f"PayNexus unexpected error: {str(e)}")
+        print(f"PayNexus unexpected error: {str(e)}", flush=True)
         return {'success': False, 'message': f'Unexpected error: {str(e)}'}
 
 
@@ -133,7 +132,7 @@ class handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json({'success': False, 'message': 'Invalid JSON body'}, 400)
         except Exception as e:
-            print(f"initiate-payment handler exception: {str(e)}")
+            print(f"initiate-payment handler exception: {str(e)}", flush=True)
             self._send_json({'success': False, 'message': str(e)}, 500)
 
     def do_OPTIONS(self):
