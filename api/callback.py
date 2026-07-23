@@ -13,64 +13,62 @@ class handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             raw_body = self.rfile.read(content_length) if content_length else b''
 
-            # CitaPay signs every webhook with HMAC-SHA256 over the RAW
-            # request body, sent in the X-CitaPay-Signature header. Unlike
-            # PayHero (which had no documented verification mechanism at
-            # all), skipping this check here means anyone who finds this
-            # URL could POST a fake "payment.completed" event and get an
-            # unpaid transaction marked as paid. So: verify first, trust
-            # nothing until it checks out.
-            secret = os.environ.get('CITAPAY_WEBHOOK_SECRET', '')
+            # PayNexus signs every webhook with HMAC-SHA256 over the RAW
+            # request body, sent in X-PayNexus-Signature. Verify first,
+            # trust nothing until it checks out.
+            secret = os.environ.get('PAYNEXUS_WEBHOOK_SECRET', '')
             if not secret:
-                print('Missing CITAPAY_WEBHOOK_SECRET — refusing to process an unverifiable webhook')
-                self._send_json({'status': 'Error', 'message': 'Webhook secret not configured'}, 500)
+                print('Missing PAYNEXUS_WEBHOOK_SECRET — refusing to process an unverifiable webhook')
+                self._send_json({'ResultCode': 1, 'ResultDesc': 'Webhook secret not configured'}, 500)
                 return
 
-            signature = self.headers.get('X-CitaPay-Signature', '')
+            signature = self.headers.get('X-PayNexus-Signature', '')
             expected = hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).hexdigest()
 
-            # Constant-time comparison — a plain `!=` leaks timing
-            # information that could theoretically help an attacker guess
-            # a valid signature byte-by-byte.
             if not signature or not hmac.compare_digest(expected, signature):
-                print('CitaPay webhook signature mismatch — ignoring request')
-                self._send_json({'status': 'Error', 'message': 'Invalid signature'}, 400)
+                print('PayNexus webhook signature mismatch — ignoring request')
+                self._send_json({'ResultCode': 1, 'ResultDesc': 'Invalid signature'}, 401)
                 return
 
             data = json.loads(raw_body) if raw_body else {}
-
-            # Log callback data (visible in Vercel function logs)
-            print(f"CitaPay Callback received (signature verified): {json.dumps(data, indent=2)}")
+            print(f"PayNexus Callback received (signature verified): {json.dumps(data, indent=2)}")
 
             event = data.get('event')
             payload = data.get('data', {})
 
-            # Prefer our own reference echoed back via metadata; fall back
-            # to the mapping we stored from CitaPay's own reference at
-            # initiate-time.
-            metadata = payload.get('metadata') or {}
-            reference = metadata.get('our_reference') or get_reference_by_checkout(payload.get('reference'))
+            paynexus_reference = payload.get('reference')
+            reference = get_reference_by_checkout(paynexus_reference) if paynexus_reference else None
 
             if not reference:
-                print(f"No stored reference for this webhook — citapay reference: {payload.get('reference')}")
+                print(f"No stored reference for this webhook — PayNexus reference: {paynexus_reference}")
             elif event == 'payment.completed':
-                print(f"Payment succeeded: {payload.get('reference')}")
-                set_payment_status(reference, status='SUCCESS', citapay_status=payload.get('status'))
+                print(f"Payment succeeded: {paynexus_reference}")
+                set_payment_status(
+                    reference,
+                    status='SUCCESS',
+                    provider_transaction_id=payload.get('provider_transaction_id'),
+                    payer_name=payload.get('payer_name'),
+                )
             elif event == 'payment.failed':
-                print(f"Payment failed: {payload.get('reference')}")
-                set_payment_status(reference, status='FAILED', citapay_status=payload.get('status'))
-            # Other event types (payout.*, refund.*, etc.) are ignored here
-            # if this endpoint is ever subscribed to more than "payment.*".
+                print(f"Payment failed: {paynexus_reference}")
+                set_payment_status(
+                    reference,
+                    status='FAILED',
+                    failure_reason=payload.get('failure_reason'),
+                    user_message=payload.get('user_message'),
+                )
+            elif event == 'payment.initiated':
+                print(f"Payment initiated confirmed by webhook: {paynexus_reference}")
+            # invoice.*, subscription.* events ignored unless subscribed.
 
-            self._send_json({'status': 'Received'}, 200)
+            self._send_json({'ResultCode': 0, 'ResultDesc': 'Received'}, 200)
         except Exception as e:
-            self._send_json({'status': 'Error', 'message': str(e)}, 400)
+            self._send_json({'ResultCode': 1, 'ResultDesc': str(e)}, 400)
 
     def do_GET(self):
         self._send_json({'status': 'Callback endpoint active'}, 200)
 
     def do_OPTIONS(self):
-        """Handle CORS preflight."""
         self.send_response(200)
         self._cors_headers()
         self.end_headers()
@@ -87,7 +85,7 @@ class handler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-CitaPay-Signature')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-PayNexus-Signature')
 
     def log_message(self, format, *args):
         pass
