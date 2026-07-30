@@ -3,137 +3,114 @@
  * POST /api/initiate-payment
  *
  * Called by the frontend when the user taps "Proceed to Payment".
- * Reads your PayNexus secret key from Vercel Environment Variables (never
- * from the frontend) and triggers a real STK push via PayNexus's
- * STK Push API.
+ * Reads your Paywave Express credentials from Vercel Environment
+ * Variables (never from the frontend) and triggers a real STK push.
  *
  * Set these in your Vercel project:
  *   Project -> Settings -> Environment Variables
- *     PAYNEXUS_SECRET_KEY   (sk_... from your PayNexus dashboard)
+ *     PAYWAVEXPRESS_API_KEY   (from your Paywave Express dashboard)
+ *     PAYWAVEXPRESS_EMAIL     (the email registered on that account)
+ *
+ * NOTE ON ARCHITECTURE: unlike the other providers integrated today,
+ * Paywave Express exposes a real transaction-status endpoint
+ * (POST /v1/tstatus). That means api/payment-status.js queries THEM
+ * directly on every poll, rather than relying on a webhook having
+ * already updated a local in-memory store — which sidesteps the
+ * cross-function in-memory-store reliability problem entirely for this
+ * provider. See api/payment-status.js and api/paywavexpress-callback.js
+ * for how that plays out.
  */
 
-import { setPaymentStatus, linkCheckoutRequestId } from '../lib/store.js';
-
-const BASE_URL = 'https://paynexus.co.ke/api';
+const BASE_URL = 'https://paywavexpress.co.ke';
 
 function normalizePhoneNumber(phone) {
-    // PayNexus's documented format is 0xxxxxxxxx (e.g. 0746990866).
-    // Defensive normalization since we don't control what shape the
-    // frontend sends — handles 254-prefixed, bare 9-digit, or already
-    // correct 0-prefixed input.
+    // Docs show both 0712345678 and 254712345678 as accepted formats, so
+    // minimal normalization is needed — just strip non-digits and ensure
+    // a 254-prefixed shape, which is the safest common denominator.
     const digits = String(phone).replace(/\D/g, '');
-    if (digits.startsWith('0')) return digits;
-    if (digits.startsWith('254')) return '0' + digits.slice(3);
-    return '0' + digits;
+    if (digits.startsWith('254')) return digits;
+    if (digits.startsWith('0')) return '254' + digits.slice(1);
+    return '254' + digits;
 }
 
-function sanitizeAmount(amount) {
-    // Frontend may send a formatted string like "2,500" or "KES 2,500".
-    // Strip everything except digits and a decimal point before converting,
-    // otherwise Number("2,500") -> NaN, JSON.stringify silently turns that
-    // into null, and PayNexus reports "amount field is required".
-    const cleaned = String(amount).replace(/[^0-9.]/g, '');
-    return Number(cleaned);
-}
+export const maxDuration = 30; // seconds — see the note in every other provider's file today about Vercel's default limit vs real STK response times
 
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
         return res.status(405).json({ success: false, message: 'Method not allowed' });
     }
 
-    const { phone_number, amount, reference, loan_limit, applicant } = req.body || {};
+    const { phone_number, amount, reference, loan_limit } = req.body || {};
 
     if (!phone_number || !amount) {
         return res.status(400).json({ success: false, message: 'Missing phone_number or amount' });
     }
 
     if (!reference) {
-        console.error('Missing reference in request body — frontend must generate and send one');
         return res.status(400).json({ success: false, message: 'Missing reference' });
     }
 
-    if (!process.env.PAYNEXUS_SECRET_KEY) {
-        console.error('Missing PAYNEXUS_SECRET_KEY environment variable');
+    if (!process.env.PAYWAVEXPRESS_API_KEY || !process.env.PAYWAVEXPRESS_EMAIL) {
+        console.error('Missing PAYWAVEXPRESS_API_KEY or PAYWAVEXPRESS_EMAIL environment variable');
         return res.status(500).json({ success: false, message: 'Payment provider not configured' });
     }
 
     const normalizedPhone = normalizePhoneNumber(phone_number);
 
-    const sanitizedAmount = Math.round(sanitizeAmount(amount));
-    if (!sanitizedAmount || sanitizedAmount <= 0 || !Number.isFinite(sanitizedAmount)) {
-        console.error('Invalid amount after sanitization:', amount, '->', sanitizedAmount);
-        return res.status(400).json({ success: false, message: 'Invalid amount' });
-    }
-
     try {
-        // TODO: persist the application (applicant, loan_limit) to your
-        // real database here — the store below only tracks payment status.
-        setPaymentStatus(reference, {
-            status: 'PENDING',
-            amount: sanitizedAmount,
-            phone_number: normalizedPhone,
-            loan_limit
-        });
+        console.log('Calling Paywave Express:', `${BASE_URL}/v1/stkpush`, 'phone:', normalizedPhone, 'amount:', amount, 'reference:', reference);
 
-        console.log('Calling PayNexus:', `${BASE_URL}/mpesa/payment/initiate`, 'phone:', normalizedPhone, 'amount:', sanitizedAmount, 'reference:', reference);
-
-        const response = await fetch(`${BASE_URL}/mpesa/payment/initiate`, {
+        const response = await fetch(`${BASE_URL}/v1/stkpush`, {
             method: 'POST',
-            headers: {
-                'X-API-Key': process.env.PAYNEXUS_SECRET_KEY,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                amount: sanitizedAmount,
-                phone: normalizedPhone,
-                description: applicant?.full_name
-                    ? `Loan application - ${applicant.full_name}`
-                    : `Loan application ${reference}`
+                api_key: process.env.PAYWAVEXPRESS_API_KEY,
+                email: process.env.PAYWAVEXPRESS_EMAIL,
+                amount: String(Math.round(Number(amount))),
+                msisdn: normalizedPhone,
+                reference
+                // account_number omitted — only required for Paybill-type
+                // linked accounts. Add it here if this account is a Paybill.
             })
         });
 
-        console.log('PayNexus response status:', response.status);
+        console.log('Paywave Express response status:', response.status);
 
-        const body = await response.json();
+        const raw = await response.text();
+        console.log('Paywave Express response body:', raw);
 
-        console.log('PayNexus response body:', JSON.stringify(body));
+        let body;
+        try {
+            body = JSON.parse(raw);
+        } catch {
+            console.error('Paywave Express returned non-JSON response:', raw);
+            return res.status(502).json({ success: false, message: 'Payment provider returned an unexpected response' });
+        }
 
-        if (!response.ok || !body.success) {
-            console.error('PayNexus payment initiation failed:', body);
-            setPaymentStatus(reference, { status: 'FAILED', error: body });
+        // Docs show success responses use "success"/"ResponseCode", and
+        // error responses use "ResultCode"/"errorMessage" — check for the
+        // presence of transaction_request_id as the actual signal of
+        // success, since that's what every downstream step depends on.
+        if (!response.ok || !body.transaction_request_id) {
+            console.error('Paywave Express STK push failed:', body);
             return res.status(502).json({
                 success: false,
-                message: body.message || 'Could not reach payment provider'
+                message: body.errorMessage || body.message || 'Could not reach payment provider'
             });
         }
 
-        const data = body.data || {};
-
-        // status here just means the request was accepted and the STK
-        // push is going out — not that the customer has paid. Real
-        // confirmation comes from the PayNexus webhook
-        // (api/paynexus-callback.js), which api/payment-status.js reports
-        // back to the frontend.
-        //
-        // PayNexus generates ITS OWN reference (unlike our pre-generated
-        // one) — link it back to our reference so the webhook, which only
-        // carries PayNexus's reference, can be translated back to ours.
-        linkCheckoutRequestId(data.reference, reference);
-        setPaymentStatus(reference, {
-            status: 'PENDING',
-            paynexusReference: data.reference,
-            checkoutRequestId: data.checkout_request_id
-        });
-
+        // transaction_request_id is what /v1/tstatus is queried with —
+        // send it back to the frontend so polling can use it directly,
+        // no separate store lookup required.
         return res.status(200).json({
             success: true,
             reference,
-            checkout_request_id: data.checkout_request_id
+            transaction_request_id: body.transaction_request_id,
+            checkout_request_id: body.CheckoutRequestID
         });
 
     } catch (err) {
-        console.error('PayNexus request error:', err.name, err.message, err.cause || '');
-        setPaymentStatus(reference, { status: 'FAILED', error: String(err) });
+        console.error('Paywave Express request error:', err.name, err.message, err.cause || '');
         return res.status(502).json({ success: false, message: 'Could not reach payment provider' });
     }
 }
